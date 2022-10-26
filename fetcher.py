@@ -6,6 +6,7 @@ import re
 import os
 import m3u8
 import sys
+import time
 import argparse
 from shutil import move
 from mutagen.mp4 import MP4
@@ -21,7 +22,7 @@ from colorama import Fore, Back
 colorama.init(autoreset=True)
 
 TOKEN = 'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IldlYlBsYXlLaWQifQ.eyJpc3MiOiJBTVBXZWJQbGF5IiwiaWF0IjoxNjU3NTk2NjY4LCJleHAiOjE2NzMxNDg2NjgsInJvb3RfaHR0cHNfb3JpZ2luIjpbImFwcGxlLmNvbSJdfQ.D3lSHZi212e7PWV_6tI8IAtkN7KQr1C1ZdcYY2vwdzHf0u5bt2tm1wtYYH87to3S-AAoz0rtANsPUsvDtG_ShA'
-Regx = re.compile(r"apple\.com\/(\w\w)\/(playlist|album|artist)\/.+\/(\d+|pl\..+)")
+Regx = re.compile(r"apple\.com\/(\w\w)\/(playlist|album|artist)\/(.+\/)?(\d+|pl\..+)")
 
 title = """
              /$$$$$$$$          /$$               /$$                          
@@ -72,8 +73,15 @@ def get_json(country, _id, token, kind):
         response = requests.get(
             f'https://amp-api.music.apple.com/v1/catalog/{country}/artists/{_id}', headers=headers, params=artist_params)
 
-    return response.json()
 
+    json = response.json()
+
+    if "message" in json:
+        print(json["message"])
+        time.sleep(0.1)
+        return get_json(country, _id, token, kind)
+
+    return json
 
 
 def get_m3u8(json, kind, atype):
@@ -86,12 +94,21 @@ def get_m3u8(json, kind, atype):
 
     if kind in ['album', 'playlist']:
         if atype == 'full':
-            return BASE['motionDetailTall']['video']
+            try:
+                return BASE['motionDetailTall']['video']
+            except:
+                try:
+                    return BASE['motionTallVideo3x4']['video']
+                except:
+                    return None
         elif atype == 'square':
             try:
                 return BASE['motionDetailSquare']['video']
             except KeyError:
-                return BASE['motionSquareVideo1x1']['video']
+                try:
+                    return BASE['motionSquareVideo1x1']['video']
+                except:
+                    return None
     elif kind == 'artist':
         if atype == 'full':
             try:
@@ -99,7 +116,10 @@ def get_m3u8(json, kind, atype):
             except KeyError:
                 return BASE['motionArtistFullscreen16x9']['video']
         elif atype == 'square':
-            return BASE['motionArtistSquare1x1']['video']
+            try:
+                return BASE['motionArtistSquare1x1']['video']
+            except:
+                return None
 
 
 def listall(json):
@@ -174,7 +194,7 @@ class Album:
         self.editorial_notes = meta.get('editorialNotes', {}).get('standard')
            
 
-def get_album_download_path(meta):
+def get_album_download_path(meta, artwork_type):
     album = Album(meta)
 
     # showing general details
@@ -189,31 +209,31 @@ def get_album_download_path(meta):
         Genre            : {album.genre}
     """
     print(metadata)
-    fname = sanitize_filename(f"{album.album} ({album.album_id}) - {args.type}.mp4")
+    fname = sanitize_filename(f"{album.album} ({album.album_id})-{artwork_type}.mp4")
     ANIMATED_PATH = os.path.join(sys.path[0], "artwork", "artists", album.artist)
     if not os.path.exists(ANIMATED_PATH):
         os.makedirs(ANIMATED_PATH)
     return os.path.join(ANIMATED_PATH, fname)
 
-def get_playlist_download_path(meta):
+def get_playlist_download_path(meta, artwork_type):
     metadata = f"""
         Playlist name    : {meta["name"]}
         Curator name     : {meta["curatorName"]}
         Modified date    : {meta["lastModifiedDate"]}
     """
     print(metadata)
-    fname = sanitize_filename(f"{meta['name']} ({meta['lastModifiedDate'][:4]}) - {args.type}.mp4")
+    fname = sanitize_filename(f"{meta['name']} ({meta['lastModifiedDate'][:4]})-{artwork_type}.mp4")
     ANIMATED_PATH = os.path.join(sys.path[0], "artwork", "playlists", meta["curatorName"])
     if not os.path.exists(ANIMATED_PATH):
         os.makedirs(ANIMATED_PATH)
     return os.path.join(ANIMATED_PATH, fname)
 
-def get_artist_download_path(meta):
+def get_artist_download_path(meta, artwork_type):
     metadata = f"""
         Artist name    : {meta["name"]}
     """
     print(metadata)
-    fname = sanitize_filename(f"artist - {args.type}.mp4")
+    fname = sanitize_filename(f"artist-{artwork_type}.mp4")
     ANIMATED_PATH = os.path.join(sys.path[0], "artwork", "artists", meta["name"])
     if not os.path.exists(ANIMATED_PATH):
         os.makedirs(ANIMATED_PATH)
@@ -268,7 +288,7 @@ def download_and_mux_audio(json, looped_video_file_name):
     os.remove(looped_video_file_name)
     os.remove(audio_file_name)
 
-def tag_album(meta):
+def tag_album(video, meta):
     album = Album(meta)
     
     video["\xa9alb"] = album.album
@@ -292,6 +312,78 @@ def tag_album(meta):
     video.save()
     print("Done.")
 
+def extract_info(url):
+    # extracting out the country and ID
+    result = Regx.search(url)
+    if result is None:
+        return None, None, None
+    country = result.group(1)
+    kind = result.group(2)
+    id_ = result.group(4)
+    return country, kind, id_
+
+def download_item(url, artwork_type, rep, aud):
+    country, kind, id_ = extract_info(url)
+
+    if not country:
+        print(Fore.RED + "Invalid URL")
+        return
+
+    # getting the json response
+    json = get_json(country, id_, token, kind)
+
+    # extracting the master m3u8 from json
+    m3u8_ = get_m3u8(json, kind, artwork_type)
+
+    if not m3u8_:
+        print(Fore.RED + "Item does not have animated artwork")
+        return
+
+    # metadata stuff
+    meta = json['data'][0]['attributes']
+
+    if kind == 'album':
+        video_path = get_album_download_path(meta, artwork_type)
+    elif kind == 'playlist':
+        video_path = get_artist_download_path(meta, artwork_type)
+    elif kind == 'artist':
+        video_path = get_artist_download_path(meta, artwork_type)
+
+    if os.path.exists(video_path):
+        print("File already exists. Skipping...")
+        return
+
+    playlist = m3u8.load(m3u8_)
+    print_table(playlist.data)
+    if args.max_resolution:
+        m3u8_ = playlist.data["playlists"][-1]['uri']
+    else:
+        playlist_id = int(input("Enter the ID: "))
+        m3u8_ = playlist.data["playlists"][playlist_id]['uri']
+
+    video_file_name = "video.mp4"
+    download_video(video_file_name, m3u8_)
+
+    looped_video_file_name = create_looped_video(video_file_name)
+
+    if aud and kind == 'album':
+        download_and_mux_audio(json, looped_video_file_name)
+    else:
+        move(looped_video_file_name, video_path)
+
+    # tagging
+    print("\nTagging metadata..")
+    video = MP4(video_path)
+    if kind == 'album':
+        tag_album(video, meta)
+    elif kind == 'playlist':
+        tag_playlist(video, meta)
+
+    print('\n'+video_path)
+
+    # deleting temp files
+    os.remove(video_file_name)
+
 def tag_playlist(meta):
     video["\xa9alb"] = meta["name"]
     video["aART"] = meta["curatorName"]
@@ -313,13 +405,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Downloads animated cover artwork from Apple music.")
     parser.add_argument(
-        '-T', '--type', help="[full,square] (square by default)", default='square', type=str)
+        '-T', '--type', help="[full,square,all] (square by default)", default='square', type=str)
     parser.add_argument(
         '-L', '--loops', help="[int] Number of times you want to loop the artwork (No loops by default)", default=0, type=int)
     parser.add_argument(
         '-A', '--audio', help="Pass this flag if you also need the audio", action="store_true")
     parser.add_argument(
-        '-R', '--resolution', help="[int] Supply a resolution ID beforehand", type=int)
+        '-M', '--max-resolution', help="Pass this flag if you need the maximum resolution", action="store_true")
+    parser.add_argument(
+        '-B', '--all-artist-albums', help="Pass this flag if you need all of an artist's albums (ignored if input is not an artist)", action="store_true")
+    parser.add_argument(
+        '-F', '--input-file', help="Pass this flag if your input is a path to a file with URLs for batch processing (one per line)", action="store_true")
     parser.add_argument(
         'url', help="URL")
 
@@ -333,64 +429,36 @@ if __name__ == "__main__":
         token = get_auth_token()
     print(Back.GREEN + "Token is valid!")
 
-    url = args.url
     artwork_type = args.type
     rep = str(args.loops)
     aud = args.audio
 
-    # extracting out the country and album ID
-    result = Regx.search(url)
-    if result is None:
-        print(Fore.RED + "Invalid URL")
-        sys.exit()
-    country = result.group(1)
-    kind = result.group(2)
-    id_ = result.group(3)
-
-    # getting the json response
-    json = get_json(country, id_, token, kind)
-
-    # extracting the master m3u8 from json
-    m3u8_ = get_m3u8(json, kind, artwork_type)
-
-    if not m3u8_:
-        print(Fore.RED + "Album does not have animated artwork")
-        sys.exit()
-
-    # metadata stuff
-    meta = json['data'][0]['attributes']
-
-    if kind == 'album':
-        video_path = get_album_download_path(meta)
-    elif kind == 'playlist':
-        video_path = get_artist_download_path(meta)
-    elif kind == 'artist':
-        video_path = get_artist_download_path(meta)
-
-    playlist = m3u8.load(m3u8_)
-    print_table(playlist.data)
-    playlist_id = args.resolution if args.resolution else int(input("Enter the ID: "))
-    m3u8_ = playlist.data["playlists"][playlist_id]['uri']
-
-    video_file_name = "video.mp4"
-    download_video(video_file_name, m3u8_)
-
-    looped_video_file_name = create_looped_video(video_file_name)
-
-    if aud and kind == 'album':
-        download_and_mux_audio(json, looped_video_file_name)
+    urls = []
+    if args.input_file:
+        with open(args.url, 'r') as f:
+            lines = [line for line in f.readlines() if line.strip()]
+            for line in lines:
+                urls.append(line)
     else:
-        move(looped_video_file_name, video_path)
+        urls =  [args.url]
 
-    # tagging
-    print("\nTagging metadata..")
-    video = MP4(video_path)
-    if kind == 'album':
-        tag_album(meta)
-    elif kind == 'playlist':
-        tag_playlist(neta)
+    for url in urls:
+        if artwork_type == 'all':
+            download_item(url, 'full', rep, aud)
+            download_item(url, 'square', rep, aud)
+        else:
+            download_item(url, artwork_type, rep, aud)
 
-    print('\n'+video_path)
-
-    # deleting temp files
-    os.remove(video_file_name)
+        if args.all_artist_albums:
+            country, kind, id_ = extract_info(url)
+            if kind == "artist":
+                print("Downloading all albums...")
+                json = get_json(country, id_, token, kind)
+                albums = json['data'][0]['relationships']['albums']['data']
+                for album in albums:
+                    url = "https://music.apple.com/us/album/" + album['id']
+                    if artwork_type == 'all':
+                        download_item(url, 'full', rep, aud)
+                        download_item(url, 'square', rep, aud)
+                    else:
+                        download_item(url, artwork_type, rep, aud)
